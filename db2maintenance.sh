@@ -117,7 +117,7 @@ overflow_weight = 0.2
 stats_age_weight = 0.1
 
 [profiles]
-# Profile fÃ¼r verschiedene Wartungsszenarien
+# Profiles for different maintenance scenarios
 quick = {
     parallel_databases = true
     max_table_parallel = 8
@@ -813,6 +813,7 @@ cecho BGREEN "==================================="
 cecho BGREEN "DB2-Datenbankwartung abgeschlossen!"
 cecho BGREEN "Logs in $LOG_DIR"
 cecho BGREEN "==================================="
+
 
 
 
