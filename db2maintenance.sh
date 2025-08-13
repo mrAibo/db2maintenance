@@ -110,7 +110,7 @@ async_operations = true
 max_async_operations = 4
 
 [priorities]
-# TabellenprioritÃ¤t basierend auf verschiedenen Faktoren
+# Table priority based on various factors
 size_weight = 0.3
 access_weight = 0.4
 overflow_weight = 0.2
@@ -813,5 +813,6 @@ cecho BGREEN "==================================="
 cecho BGREEN "DB2-Datenbankwartung abgeschlossen!"
 cecho BGREEN "Logs in $LOG_DIR"
 cecho BGREEN "==================================="
+
 
 
