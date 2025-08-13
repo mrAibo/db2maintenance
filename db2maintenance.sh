@@ -61,9 +61,9 @@ show_help() {
     exit 0
 }
 
-# Standard-Konfiguration
+# Default configuration
 DEFAULT_CONFIG=$(cat << 'EOF'
-# DB2 Wartungskonfiguration
+# DB2 Maintenance Configuration
 [general]
 auto_config = true
 check_resources = true
@@ -813,4 +813,5 @@ cecho BGREEN "==================================="
 cecho BGREEN "DB2-Datenbankwartung abgeschlossen!"
 cecho BGREEN "Logs in $LOG_DIR"
 cecho BGREEN "==================================="
+
 
