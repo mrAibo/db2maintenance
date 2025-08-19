@@ -1,19 +1,19 @@
 #!/bin/bash
 # ***********************************************************************
-# Programname   : arge_db2_maintenance.sh                              *
+# Programname   : arge_db2_maintenance_optimized.sh                   *
 #                                                                       *
-# Description   : DB2 Pflege nach einem DB2 Upgrade                     *
+# Description   : Optimized DB2 maintenance script                    *
 #                                                                       *
 # Author        : A. V                                                  *
-# Version       : 6.0.0 31.07.2025                                     *
+# Version       : 7.1.0 13.08.2025                                     *
 #***********************************************************************
 SCRIPT_USER="db2icm"
 LOG_DIR="$HOME/db2_wartung_log"
 CONFIG_DIR="$HOME/.db2_maintenance"
 HISTORY_DIR="$HOME/.db2_maintenance/history"
-TS=$(date +"%y%m%d_%H%M")  # Erweiterter Timestamp mit Uhrzeit (CEST: 31.07.2025, 14:00)
+TS=$(date +"%y%m%d_%H%M")
 
-# Farbige Ausgaben (verbessert)
+# Farbige Ausgaben
 cecho() {
     local color="$1"
     local msg="$2"
@@ -26,44 +26,15 @@ cecho() {
         BCYAN)   color_code=$(tput setaf 6 && tput bold) ;;
         RED)     color_code=$(tput setaf 1) ;;
         GREEN)   color_code=$(tput setaf 2) ;;
+        BCREEN)  color_code=$(tput setaf 2 && tput bold) ;;
         *)       color_code="" ;;
     esac
     printf "%s%s%s\n" "${color_code}" "${msg}" "${color_reset}"
 }
 
-# Hilfe-Funktion
-show_help() {
-    cecho BGREEN "Verwendung: $0 [OPTIONEN]"
-    echo "Optionen:"
-    echo "  --help                     Diese Hilfe anzeigen"
-    echo "  --database DB              Nur eine spezifische Datenbank bearbeiten (z.B. --database MYDB)"
-    echo "  --dry-run                 Simuliert die AusfÃ¼hrung ohne echte DB-Ã„nderungen"
-    echo "  --parallel                Parallele Verarbeitung mehrerer Datenbanken (erfordert 'parallel' Tool)"
-    echo "  --table-parallel N        Parallele Verarbeitung von Tabellen (Standard: auto)"
-    echo "  --batch-size N            Batch-GrÃ¶ÃŸe fÃ¼r Operationen (Standard: auto)"
-    echo "  --reorg-only              Nur REORG durchfÃ¼hren"
-    echo "  --runstats-only           Nur RUNSTATS durchfÃ¼hren"
-    echo "  --rebind-only             Nur REBIND durchfÃ¼hren"
-    echo "  --skip-reorg              REORG-Schritt Ã¼berspringen"
-    echo "  --skip-runstats           RUNSTATS-Schritt Ã¼berspringen"
-    echo "  --skip-rebind             REBIND-Schritt Ã¼berspringen"
-    echo "  --table-priority P        TabellenprioritÃ¤t: low, medium, high (Standard: medium)"
-    echo "  --table-filter F          Filter fÃ¼r Tabellennamen (z.B. 'ICMADMIN.%')"
-    echo "  --check-resources         Systemressourcen vor dem Start prÃ¼fen"
-    echo "  --auto-config             Automatische Konfiguration aller Parameter (Standard)"
-    echo "  --config-file F           Verwende spezifische Konfigurationsdatei"
-    echo "  --profile P               Verwende spezifisches Profil (quick, thorough, minimal)"
-    echo "  --interactive             Interaktiver Modus"
-    echo "  --resume                 Setze unterbrochene Wartung fort"
-    echo "  --test-mode              Testmodus - zeige nur, was getan wÃ¼rde"
-    echo "  --progress                Zeige detaillierte Fortschrittsanzeige"
-    echo "  --force                   Erzwingt REORG, RUNSTATS und REBIND fÃ¼r alle Tabellen ohne vorherige PrÃ¼fung"
-    exit 0
-}
-
 # Standard-Konfiguration
 DEFAULT_CONFIG=$(cat << 'EOF'
-# DB2 Wartungskonfiguration
+# DB2 Wartungskonfiguration (optimiert)
 [general]
 auto_config = true
 check_resources = true
@@ -81,9 +52,17 @@ max_io_load = 80
 log_level = info
 enable_history = true
 history_retention_days = 30
-
+use_db2batch = true
+max_io_concurrent_reorg = 2
+max_total_reorg_pages = 100000
+analyze_index_pctfree = false
+flush_package_cache = true
 [reorg]
 enable = true
+use_reorgchk = true
+reorg_mode = INPLACE
+reclaim_extents = true
+max_parallel_reorg = 2
 check_overflow = true
 overflow_threshold = 5
 check_deleted_rows = true
@@ -92,9 +71,10 @@ check_stats_time = true
 stats_time_threshold_days = 30
 async_operations = true
 max_async_operations = 4
-
 [runstats]
 enable = true
+initial_light = true
+full_after_reorg = true
 detailed_stats_large_tables = true
 large_table_threshold = 1000000
 sample_small_tables = true
@@ -102,64 +82,86 @@ small_table_threshold = 100000
 sample_rate = 10
 async_operations = true
 max_async_operations = 4
-
+max_parallel_runstats = 8
+flush_package_cache = true
 [rebind]
 enable = true
 rebind_invalid_only = true
 async_operations = true
 max_async_operations = 4
-
 [priorities]
-# TabellenprioritÃ¤t basierend auf verschiedenen Faktoren
 size_weight = 0.3
 access_weight = 0.4
 overflow_weight = 0.2
 stats_age_weight = 0.1
-
 [profiles]
-# Profile fÃ¼r verschiedene Wartungsszenarien
 quick = {
     parallel_databases = true
     max_table_parallel = 8
     adaptive_batch_size = true
     min_batch_size = 10
     max_batch_size = 50
-    reorg_check_overflow = true
-    reorg_check_deleted_rows = false
-    reorg_check_stats_time = false
-    runstats_detailed_stats_large_tables = true
-    runstats_sample_small_tables = true
-    runstats_sample_rate = 5
+    reorg_use_reorgchk = true
+    reorg_max_parallel = 2
+    runstats_initial_light = true
+    runstats_full_after_reorg = true
+    runstats_max_parallel = 8
 }
-
 thorough = {
     parallel_databases = true
     max_table_parallel = 4
     adaptive_batch_size = true
     min_batch_size = 5
     max_batch_size = 20
-    reorg_check_overflow = true
-    reorg_check_deleted_rows = true
-    reorg_check_stats_time = true
-    runstats_detailed_stats_large_tables = true
-    runstats_sample_small_tables = false
+    reorg_use_reorgchk = true
+    reorg_max_parallel = 1
+    runstats_initial_light = true
+    runstats_full_after_reorg = true
+    runstats_max_parallel = 4
 }
-
 minimal = {
     parallel_databases = false
     max_table_parallel = 2
     adaptive_batch_size = true
     min_batch_size = 5
     max_batch_size = 10
-    reorg_check_overflow = true
-    reorg_check_deleted_rows = false
-    reorg_check_stats_time = false
-    runstats_detailed_stats_large_tables = false
-    runstats_sample_small_tables = true
-    runstats_sample_rate = 20
+    reorg_use_reorgchk = true
+    reorg_max_parallel = 1
+    runstats_initial_light = true
+    runstats_full_after_reorg = false
+    runstats_max_parallel = 2
 }
 EOF
 )
+
+# Hilfe-Funktion
+show_help() {
+    cecho BGREEN "Verwendung: $0 [OPTIONEN]"
+    echo "Optionen:"
+    echo "  --help                     Diese Hilfe anzeigen"
+    echo "  --database DB              Nur eine spezifische Datenbank bearbeiten"
+    echo "  --dry-run                  Simuliert die Ausführung ohne echte DB-Änderungen"
+    echo "  --parallel                 Parallele Verarbeitung mehrerer Datenbanken"
+    echo "  --table-parallel N         Parallele Verarbeitung von Tabellen (Standard: auto)"
+    echo "  --batch-size N             Batch-Größe für Operationen (Standard: auto)"
+    echo "  --reorg-only               Nur REORG durchführen"
+    echo "  --runstats-only            Nur RUNSTATS durchführen"
+    echo "  --rebind-only              Nur REBIND durchführen"
+    echo "  --skip-reorg               REORG-Schritt überspringen"
+    echo "  --skip-runstats            RUNSTATS-Schritt überspringen"
+    echo "  --skip-rebind              REBIND-Schritt überspringen"
+    echo "  --table-priority P         Tabellenpriorität: low, medium, high"
+    echo "  --table-filter F           Filter für Tabellennamen"
+    echo "  --check-resources          Systemressourcen vor dem Start prüfen"
+    echo "  --auto-config              Automatische Konfiguration aller Parameter"
+    echo "  --config-file F            Verwende spezifische Konfigurationsdatei"
+    echo "  --profile P                Verwende spezifisches Profil"
+    echo "  --interactive              Interaktiver Modus"
+    echo "  --resume                   Setze unterbrochene Wartung fort"
+    echo "  --test-mode                Testmodus - zeige nur, was getan würde"
+    echo "  --force                    Erzwingt REORG, RUNSTATS und REBIND für alle Tabellen"
+    exit 0
+}
 
 # Argumente parsen
 DRY_RUN=0
@@ -209,14 +211,13 @@ while [[ $# -gt 0 ]]; do
         --interactive) INTERACTIVE=1 ;;
         --resume) RESUME=1 ;;
         --test-mode) TEST_MODE=1 ;;
-        --progress) PROGRESS=1 ;;
         --force) FORCE_MODE=1 ;;
         *) cecho RED "Unbekannte Option: $1"; show_help ;;
     esac
     shift
 done
 
-# Exklusive Optionen prÃ¼fen
+# Exklusive Optionen prüfen
 if [ $REORG_ONLY -eq 1 ]; then
     SKIP_RUNSTATS=1
     SKIP_REBIND=1
@@ -230,9 +231,9 @@ if [ $REBIND_ONLY -eq 1 ]; then
     SKIP_RUNSTATS=1
 fi
 
-# Benutzer prÃ¼fen
+# Benutzer prüfen
 if [ "${USER}" != "${SCRIPT_USER}" ]; then
-    cecho RED "Benutzer muss ${SCRIPT_USER} sein, um das Skript auszufÃ¼hren..."
+    cecho RED "Benutzer muss ${SCRIPT_USER} sein, um das Skript auszuführen..."
     exit 1
 fi
 
@@ -241,7 +242,7 @@ mkdir -p "$LOG_DIR"
 mkdir -p "$CONFIG_DIR"
 mkdir -p "$HISTORY_DIR"
 
-# Standard-Konfigurationsdatei erstellen, falls nicht vorhanden
+# Standard-Konfigurationsdatei erstellen
 if [ ! -f "$CONFIG_DIR/config.ini" ]; then
     echo "$DEFAULT_CONFIG" > "$CONFIG_DIR/config.ini"
     cecho BCYAN "Standard-Konfigurationsdatei erstellt: $CONFIG_DIR/config.ini"
@@ -251,27 +252,17 @@ fi
 load_config() {
     local config_file="$1"
     local section=""
-    
     while IFS= read -r line; do
-        # Kommentare und leere Zeilen Ã¼berspringen
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
         [[ "$line" =~ ^[[:space:]]*$ ]] && continue
-        
-        # Sektionsheader erkennen
         if [[ "$line" =~ ^\[([^\]]+)\] ]]; then
             section="${BASH_REMATCH[1]}"
             continue
         fi
-        
-        # SchlÃ¼ssel-Wert-Paare verarbeiten
         if [[ "$line" =~ ^[[:space:]]*([^=]+)[[:space:]]*=[[:space:]]*(.+)$ ]]; then
             local key="${BASH_REMATCH[1]// /}"
             local value="${BASH_REMATCH[2]}"
-            
-            # Entferne fÃ¼hrende/nachfolgende Leerzeichen vom Wert
             value=$(echo "$value" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-            
-            # Speichere in assoziativem Array
             config["${section}.${key}"]="$value"
         fi
     done < "$config_file"
@@ -291,12 +282,10 @@ else
     load_config "$CONFIG_DIR/config.ini"
 fi
 
-# Profil anwenden, falls angegeben
+# Profil anwenden
 if [ -n "$PROFILE" ]; then
     if [[ -v "config[profiles.$PROFILE]" ]]; then
         cecho BCYAN "Verwende Profil: $PROFILE"
-        # Hier wÃ¼rde die Profilkonfiguration angewendet werden
-        # In einer vollstÃ¤ndigen Implementierung wÃ¼rde dies die Standardkonfiguration Ã¼berschreiben
     else
         cecho RED "Profil nicht gefunden: $PROFILE"
         exit 1
@@ -307,30 +296,41 @@ fi
 TMP_DIR=$(mktemp -d -p /tmp db2_maintenance.XXXXXX) || { cecho RED "Fehler beim Erstellen des Temp-Verzeichnisses"; exit 1; }
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-# Funktion zur sprachunabhängigen CPU-Auslastungsermittlung
+# Korrigierte CPU-Auslastungsermittlung
 get_cpu_usage() {
-    # Stellt sicher, dass die Ausgabe von Tools sprachunabhängig ist
-    export LC_ALL=C
     if command -v mpstat >/dev/null 2>&1; then
-        # mpstat 1 1: 1 Sekunde Intervall, 1 Mal ausführen
-        # awk sucht nach der Zeile "Average" und druckt 100 minus der letzten Spalte (%idle)
-        mpstat 1 1 | awk '/Average:|Durchschnitt:/{print 100 - $NF}'
+        LC_ALL=C mpstat 1 5 | awk '/Average:/ {print 100 - $NF}'
     else
-        # Fallback zu /proc/stat, wenn mpstat nicht verfügbar ist
-        local stat1=($(head -n1 /proc/stat))
+        local cpu_line=$(grep '^cpu ' /proc/stat)
+        local user=$(echo $cpu_line | awk '{print $2}')
+        local nice=$(echo $cpu_line | awk '{print $3}')
+        local system=$(echo $cpu_line | awk '{print $4}')
+        local idle=$(echo $cpu_line | awk '{print $5}')
+        local iowait=$(echo $cpu_line | awk '{print $6}')
+        local irq=$(echo $cpu_line | awk '{print $7}')
+        local softirq=$(echo $cpu_line | awk '{print $8}')
         sleep 1
-        local stat2=($(head -n1 /proc/stat))
-
-        local user_diff=$((stat2[1] - stat1[1]))
-        local nice_diff=$((stat2[2] - stat1[2]))
-        local system_diff=$((stat2[3] - stat1[3]))
-        local idle_diff=$((stat2[4] - stat1[4]))
-
-        local total_diff=$((user_diff + nice_diff + system_diff + idle_diff))
-        if [ $total_diff -eq 0 ]; then
-            echo 0
+        local cpu_line2=$(grep '^cpu ' /proc/stat)
+        local user2=$(echo $cpu_line2 | awk '{print $2}')
+        local nice2=$(echo $cpu_line2 | awk '{print $3}')
+        local system2=$(echo $cpu_line2 | awk '{print $4}')
+        local idle2=$(echo $cpu_line2 | awk '{print $5}')
+        local iowait2=$(echo $cpu_line2 | awk '{print $6}')
+        local irq2=$(echo $cpu_line2 | awk '{print $7}')
+        local softirq2=$(echo $cpu_line2 | awk '{print $8}')
+        local user_diff=$((user2 - user))
+        local nice_diff=$((nice2 - nice))
+        local system_diff=$((system2 - system))
+        local idle_diff=$((idle2 - idle))
+        local iowait_diff=$((iowait2 - iowait))
+        local irq_diff=$((irq2 - irq))
+        local softirq_diff=$((softirq2 - softirq))
+        local total_diff=$((user_diff + nice_diff + system_diff + idle_diff + iowait_diff + irq_diff + softirq_diff))
+        local busy_diff=$((total_diff - idle_diff))
+        if [ $total_diff -gt 0 ]; then
+            echo "scale=2; ($busy_diff * 100) / $total_diff" | bc
         else
-            echo $((100 * (total_diff - idle_diff) / total_diff))
+            echo "0"
         fi
     fi
 }
@@ -338,265 +338,784 @@ get_cpu_usage() {
 # Funktion zur automatischen Konfiguration
 auto_configure() {
     cecho BYELLOW "Führe automatische Konfiguration durch..."
-
-    NUM_CORES=$(nproc)
+    local NUM_CORES=$(nproc)
     cecho BCYAN "Erkannte CPU-Kerne: $NUM_CORES"
-
-    # free -m für präzisere Werte in MB statt gerundeten GB
-    FREE_MEM_MB=$(free -m | awk '/Mem:/ {print $7}')
+    local FREE_MEM_MB=$(free -m | awk '/Mem:/ {print $7}')
     cecho BCYAN "Freier Speicher: ${FREE_MEM_MB}MB"
-
-    CPU_USAGE=$(get_cpu_usage)
+    local CPU_USAGE=$(get_cpu_usage)
     cecho BCYAN "CPU-Auslastung: ${CPU_USAGE}%"
-
-    DISK_USAGE=$(df -h / | awk 'NR==2 {print $5}' | sed 's/%//')
+    local DISK_USAGE=$(df -h / | awk 'NR==2 {print $5}' | sed 's/%//')
     cecho BCYAN "Festplattenspeicher: ${DISK_USAGE}% verwendet"
-
+    
     if [ "$TABLE_PARALLEL" = "auto" ]; then
         TABLE_PARALLEL=$NUM_CORES
-        local max_parallel=${config[general.max_table_parallel]:-4}
+        local max_parallel=${config[general.max_table_parallel]:-8}
         if [ "$TABLE_PARALLEL" -gt "$max_parallel" ]; then
             TABLE_PARALLEL=$max_parallel
         fi
-        if (( $(echo "$CPU_USAGE > 80" | bc -l) )); then
+        if [ "$(echo "$CPU_USAGE > 70" | bc)" -eq 1 ]; then
             TABLE_PARALLEL=$((TABLE_PARALLEL / 2))
+            cecho BYELLOW "Reduziere Parallelisierung aufgrund hoher CPU-Auslastung auf $TABLE_PARALLEL"
         fi
-        if [ "$FREE_MEM_MB" -lt 4000 ]; then # 4GB
+        if [ "$FREE_MEM_MB" -lt 4096 ]; then
             TABLE_PARALLEL=$((TABLE_PARALLEL / 2))
+            cecho BYELLOW "Reduziere Parallelisierung aufgrund geringen Speichers auf $TABLE_PARALLEL"
         fi
-        [ $TABLE_PARALLEL -lt 1 ] && TABLE_PARALLEL=1
+        if [ "$TABLE_PARALLEL" -lt 1 ]; then
+            TABLE_PARALLEL=1
+        fi
+    fi
+    
+    local max_reorg_parallel=${config[reorg.max_parallel_reorg]:-2}
+    if [ "$TABLE_PARALLEL" -gt "$max_reorg_parallel" ]; then
+        REORG_PARALLEL=$max_reorg_parallel
+    else
+        REORG_PARALLEL=$TABLE_PARALLEL
+    fi
+    
+    local max_runstats_parallel=${config[runstats.max_parallel_runstats]:-8}
+    if [ "$TABLE_PARALLEL" -gt "$max_runstats_parallel" ]; then
+        RUNSTATS_PARALLEL=$max_runstats_parallel
+    else
+        RUNSTATS_PARALLEL=$TABLE_PARALLEL
     fi
     
     if [ "$BATCH_SIZE" = "auto" ]; then
         BATCH_SIZE=${config[general.default_batch_size]:-20}
     fi
-
+    
     cecho BGREEN "Automatische Konfiguration abgeschlossen:"
     cecho BGREEN "  - Tabellen-Parallelität: $TABLE_PARALLEL"
+    cecho BGREEN "  - REORG-Parallelität: $REORG_PARALLEL"
+    cecho BGREEN "  - RUNSTATS-Parallelität: $RUNSTATS_PARALLEL"
     cecho BGREEN "  - Batch-Größe: $BATCH_SIZE"
 }
 
 # Systemressourcen prüfen
 check_system_resources() {
     cecho BYELLOW "Prüfe Systemressourcen..."
-    
-    FREE_MEM_MB=$(free -m | awk '/Mem:/ {print $7}')
+    local FREE_MEM_MB=$(free -m | awk '/Mem:/ {print $7}')
     if [ "$FREE_MEM_MB" -lt 1024 ]; then
         cecho RED "Nicht genügend freier Speicher: ${FREE_MEM_MB}MB (mindestens 1GB erforderlich)"
         exit 1
     fi
     cecho GREEN "Freier Speicher: ${FREE_MEM_MB}MB"
-
-    CPU_USAGE=$(get_cpu_usage)
-    if (( $(echo "$CPU_USAGE > 95" | bc -l) )); then
+    local CPU_USAGE=$(get_cpu_usage)
+    if (( $(echo "$CPU_USAGE > 90" | bc -l) )); then
         cecho RED "CPU-Auslastung zu hoch: ${CPU_USAGE}%"
         exit 1
     fi
     cecho GREEN "CPU-Auslastung: ${CPU_USAGE}%"
-
-    DISK_USAGE=$(df -h / | awk 'NR==2 {print $5}' | sed 's/%//')
-    if [ "$DISK_USAGE" -gt 95 ]; then
+    local DISK_USAGE=$(df -h / | awk 'NR==2 {print $5}' | sed 's/%//')
+    if [ "$DISK_USAGE" -gt 90 ]; then
         cecho RED "Festplattenspeicher zu voll: ${DISK_USAGE}%"
         exit 1
     fi
     cecho GREEN "Festplattenspeicher: ${DISK_USAGE}% verwendet"
 }
 
-# Führt ein generiertes SQL/CMD-Skript aus oder zeigt es im Dry-Run-Modus an
-execute_script() {
+# Funktion zur Ermittlung der Tabellengrößen
+get_table_sizes() {
     local db="$1"
-    local script_file="$2"
-    local operation_name="$3"
-    local log_file="$4"
-
-    if [ ! -s "$script_file" ]; then
-        cecho YELLOW "Keine Befehle für $operation_name in $db gefunden. Überspringe."
-        return
+    local output_file="$2"
+    db2 connect to "$db" > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        cecho RED "Fehler: Konnte keine Verbindung zu $db herstellen"
+        return 1
     fi
+    local query="SELECT RTRIM(TABSCHEMA) || '.' || RTRIM(TABNAME), CARD, NPAGES FROM SYSCAT.TABLES WHERE TYPE = 'T' AND TABSCHEMA NOT LIKE 'SYS%' AND TABSCHEMA NOT IN ('NULLID', 'SYSCAT', 'SYSSTAT', 'SYSFUN', 'SYSIBM', 'SYSPUBLIC')"
+    db2 -x "$query" > "$output_file" 2>/dev/null
+    db2 connect reset > /dev/null 2>&1
     
-    cecho BYELLOW "Starte $operation_name für $db..."
-    
-    if [ $DRY_RUN -eq 1 ]; then
-        cecho BCYAN "--- Dry-Run: $operation_name Skript für $db ---"
-        cat "$script_file"
-        cecho BCYAN "--- Ende Dry-Run ---"
-    else
-        {
-            echo "=== $operation_name Start: $(date) ==="
-            db2 -tvf "$script_file"
-            echo "=== $operation_name Ende: $(date) ==="
-        } >> "$log_file" 2>&1
-        cecho BGREEN "$operation_name für $db abgeschlossen."
+    if [ ! -s "$output_file" ]; then
+        echo "-- Keine Tabellen gefunden" > "$output_file"
     fi
 }
 
-# Hauptfunktion für die Datenbankverarbeitung (NEU & OPTIMIERT)
+# Funktion zur Ermittlung der REORG-Kandidaten
+get_reorg_candidates() {
+    local db="$1"
+    local output_file="$2"
+    db2 connect to "$db" > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        cecho RED "Fehler: Konnte keine Verbindung zu $db herstellen"
+        return 1
+    fi
+    local overflow_threshold="${config[reorg.overflow_threshold]}"
+    local stats_time_threshold_days="${config[reorg.stats_time_threshold_days]}"
+    
+    # Definiere die funktionierende Fallback-Abfrage einmal, um Code-Duplikation zu vermeiden
+    local fallback_query="SELECT RTRIM(TABSCHEMA) || '.' || RTRIM(TABNAME) FROM SYSCAT.TABLES WHERE TYPE = 'T' AND TABSCHEMA NOT LIKE 'SYS%' AND (OVERFLOW > $overflow_threshold OR STATS_TIME IS NULL OR DAYS(CURRENT TIMESTAMP) - DAYS(STATS_TIME) > $stats_time_threshold_days)"
+    
+    if [ "${config[reorg.use_reorgchk]}" = "true" ]; then
+        # Verwende die korrekte REORGCHK-Syntax für DB2 v12.1.1.0
+        if ! db2 "REORGCHK CURRENT STATISTICS" > "$TMP_DIR/reorgchk_output.txt" 2>&1; then
+            cecho YELLOW "Hinweis: REORGCHK nicht verfügbar, verwende Fallback-Methode"
+            db2 -x "$fallback_query" > "$output_file" 2>/dev/null
+            db2 connect reset > /dev/null 2>&1
+            return 0
+        fi
+        
+        if grep -q "SQLSTATE\|SQL0104N\|DB2" "$TMP_DIR/reorgchk_output.txt"; then
+            cecho YELLOW "Hinweis: REORGCHK enthielt Fehler - verwende Fallback-Methode"
+            db2 -x "$fallback_query" > "$output_file" 2>/dev/null
+        else
+            # Verwende das getestete AWK-Skript, um REORG-Kandidaten zu extrahieren
+            awk '
+            /\*/ {
+                # Wenn die aktuelle Zeile ein Sternchen enthält, prüfe die vorherige Zeile
+                if (prev ~ /^Tabelle:/) {
+                    # Extrahiere den Tabellennamen aus der vorherigen Zeile
+                    split(prev, parts, " ");
+                    print parts[2];
+                }
+            }
+            {
+                # Speichere die aktuelle Zeile für die nächste Iteration
+                prev = $0;
+            }
+            ' "$TMP_DIR/reorgchk_output.txt" > "$output_file"
+            
+            # Wenn keine Tabellen gefunden wurden, gib eine klare Meldung aus
+            if [ ! -s "$output_file" ]; then
+                cecho BCYAN "REORGCHK abgeschlossen: Keine Tabellen benötigen REORG"
+                echo "-- Keine REORG-Kandidaten gefunden" > "$output_file"
+            fi
+        fi
+    else
+        db2 -x "$fallback_query" > "$output_file" 2>/dev/null
+    fi
+    
+    db2 connect reset > /dev/null 2>&1
+    
+    if [ ! -s "$output_file" ]; then
+        echo "-- Keine REORG-Kandidaten gefunden" > "$output_file"
+    fi
+}
+
+# Neue Funktion zur Überprüfung der Existenz von Tabellen
+verify_existing_tables() {
+    local db="$1"
+    local input_file="$2"
+    local temp_file="$TMP_DIR/verified_tables.txt"
+    
+    if [ ! -s "$input_file" ]; then
+        return 0
+    fi
+    
+    > "$temp_file"
+    while IFS= read -r table; do
+        if [[ "$table" =~ ^-- ]] || [ -z "$table" ]; then
+            continue
+        fi
+        
+        # Überprüfen, ob die Tabelle existiert
+        local schema=$(echo "$table" | cut -d'.' -f1)
+        local tablename=$(echo "$table" | cut -d'.' -f2)
+        
+        if db2 -x "SELECT 1 FROM SYSCAT.TABLES WHERE TABSCHEMA = '$schema' AND TABNAME = '$tablename' WITH UR" > /dev/null 2>&1; then
+            echo "$table" >> "$temp_file"
+        else
+            cecho YELLOW "Tabelle $table existiert nicht, wird aus REORG-Liste entfernt"
+        fi
+    done < "$input_file"
+    
+    mv "$temp_file" "$input_file"
+}
+
+# Funktion zur Generierung von RUNSTATS-SQL
+generate_runstats_sql() {
+    local input_file="$1"
+    local output_file="$2"
+    local mode="$3"
+    printf -- "-- RUNSTATS Statements (%s mode)\n" "$mode" > "$output_file"
+    
+    if [ ! -s "$input_file" ]; then
+        echo "-- Keine Tabellen gefunden" >> "$output_file"
+        return 0
+    fi
+    
+    while IFS=' ' read -r table card npages; do
+        if [ -z "$table" ] || [[ "$table" =~ ^-- ]]; then
+            continue
+        fi
+        if ! [[ "$card" =~ ^[0-9]+$ ]]; then
+            continue
+        fi
+        
+        if [ "$mode" = "light" ]; then
+            # Leichtgewichtige RUNSTATS für alle Tabellen
+            echo "RUNSTATS ON TABLE $table WITH DISTRIBUTION AND INDEXES ALL ALLOW WRITE ACCESS" >> "$output_file"
+        else
+            # Volle RUNSTATS nur nach REORG
+            echo "RUNSTATS ON TABLE $table WITH DISTRIBUTION AND INDEXES ALL ALLOW WRITE ACCESS" >> "$output_file"
+        fi
+    done < "$input_file"
+}
+
+# Funktion zur Generierung von REORG-SQL
+generate_reorg_sql() {
+    local input_file=$1
+    local output_file=$2
+    local table_sizes=$3
+    echo "-- REORG Statements" > "$output_file"
+    
+    if [ ! -s "$input_file" ] || grep -q "Keine.*REORG-Kandidaten gefunden" "$input_file"; then
+        echo "-- Keine REORG-Kandidaten gefunden" >> "$output_file"
+        return 0
+    fi
+    
+    local valid_count=0
+    local invalid_count=0
+    
+    while read -r table; do
+        if [[ "$table" =~ ^-- ]] || [ -z "$table" ]; then
+            continue
+        fi
+        # Überprüfen, ob die Zeile eine Fehlermeldung enthält
+        if [[ "$table" =~ SQL[0-9]+N ]] || [[ "$table" =~ SQLSTATE ]]; then
+            invalid_count=$((invalid_count + 1))
+            continue
+        fi
+        if [[ ! "$table" =~ ^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            cecho YELLOW "Ungültiger Tabellenname: $table - überspringe"
+            invalid_count=$((invalid_count + 1))
+            continue
+        fi
+        local reorg_mode="${config[reorg.reorg_mode]:-INPLACE}"
+        echo "REORG TABLE $table $reorg_mode ALLOW WRITE ACCESS" >> "$output_file"
+        valid_count=$((valid_count + 1))
+    done < "$input_file"
+    
+    if [ $valid_count -eq 0 ]; then
+        echo "-- Keine gültigen REORG-Anweisungen generiert" >> "$output_file"
+        cecho YELLOW "Warnung: Keine gültigen REORG-Anweisungen generiert. Gültige: $valid_count, Ungültige: $invalid_count"
+    else
+        cecho BGREEN "Generierte REORG-Anweisungen für $valid_count Tabellen. (Ungültige: $invalid_count)"
+    fi
+}
+
+# Funktion zur Generierung von REORG-SQL im Force-Modus
+generate_reorg_sql_force() {
+    local table_sizes_file=$1
+    local output_file=$2
+    echo "-- REORG Statements (Force-Modus)" > "$output_file"
+    
+    if [ ! -s "$table_sizes_file" ]; then
+        echo "-- Keine Tabellen gefunden (Force-Modus)" >> "$output_file"
+        return 0
+    fi
+    
+    local reorg_mode="${config[reorg.reorg_mode]:-INPLACE}"
+    local valid_count=0
+    local invalid_count=0
+    
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ -z "$line" ]] || [[ "$line" =~ ^[[:space:]]*-- ]]; then
+            continue
+        fi
+        
+        line=$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        local raw_table=$(printf '%s' "$line" | awk '{print $1}')
+        raw_table=$(printf '%s' "$raw_table" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        local table=$(printf '%s' "$raw_table" | tr -cd '[:print:]')
+        
+        if [[ -n "$table" && "$table" =~ ^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            echo "REORG TABLE $table $reorg_mode ALLOW WRITE ACCESS" >> "$output_file"
+            valid_count=$((valid_count + 1))
+        else
+            invalid_count=$((invalid_count + 1))
+            printf "Ungueltiger Tabellenname (Force-Modus): raw='%s', cleaned='%s' - ueberspringe\n" "$raw_table" "$table" >&2
+        fi
+    done < "$table_sizes_file"
+    
+    if [ ! -s "$output_file" ] || ! grep -q "REORG TABLE" "$output_file"; then
+        echo "-- Keine gültigen REORG-Anweisungen generiert (Force-Modus)" >> "$output_file"
+        cecho RED "Warnung: Keine gültigen REORG-Anweisungen generiert. Gültige: $valid_count, Ungueltige: $invalid_count"
+    else
+        cecho BGREEN "Force-Modus: Generierte REORG-Anweisungen fuer $valid_count Tabellen. (Ungueltige: $invalid_count)"
+    fi
+}
+
+# Funktion zur Generierung von REBIND-SQL
+generate_rebind_sql() {
+    local db="$1"
+    local output_file="$2"
+    db2 connect to "$db" > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        cecho RED "Fehler: Konnte keine Verbindung zu $db herstellen"
+        return 1
+    fi
+    local header="-- REBIND Statements"
+    echo "$header" > "$output_file"
+    
+    if [ "${config[rebind.rebind_invalid_only]}" = "true" ]; then
+        db2 -x "SELECT 'REBIND PACKAGE ' || RTRIM(PKGSCHEMA) || '.' || RTRIM(PKGNAME) || ';'
+                 FROM SYSCAT.PACKAGES
+                 WHERE PKGSCHEMA NOT LIKE 'SYS%'
+                 AND PKGSCHEMA NOT IN ('NULLID', 'SYSIBMADM', 'SYSIBMINTERNAL', 'SYSPROC')
+                 AND VALID = 'N'" >> "$output_file" 2>/dev/null
+    else
+        db2 -x "SELECT 'REBIND PACKAGE ' || RTRIM(PKGSCHEMA) || '.' || RTRIM(PKGNAME) || ';'
+                 FROM SYSCAT.PACKAGES
+                 WHERE PKGSCHEMA NOT LIKE 'SYS%'
+                 AND PKGSCHEMA NOT IN ('NULLID', 'SYSIBMADM', 'SYSIBMINTERNAL', 'SYSPROC')" >> "$output_file" 2>/dev/null
+    fi
+    
+    db2 connect reset > /dev/null 2>&1
+    
+    if [ ! -s "$output_file" ] || ! grep -q "REBIND PACKAGE" "$output_file"; then
+        local no_packages="-- Keine gültigen Pakete zum Binden gefunden"
+        echo "$no_packages" >> "$output_file"
+    fi
+}
+
+# Funktion zur Ausführung mit db2batch
+execute_with_db2batch() {
+    local db="$1"
+    local sql_file="$2"
+    local parallel="$3"
+    local log_file="$4"
+    if [ ! -s "$sql_file" ]; then
+        cecho YELLOW "Keine Statements in $sql_file gefunden - überspringe Ausführung"
+        return 0
+    fi
+    mkdir -p "$(dirname "$log_file")"
+    local line_count
+    line_count=$(wc -l < "$sql_file" 2>/dev/null)
+    local message="Führe ${line_count} Statements mit db2batch aus..."
+    cecho BCYAN "$message"
+    if [ $DRY_RUN -eq 1 ]; then
+        cecho YELLOW "Dry-Run: Würde ausführen: db2batch -d $db -f $sql_file -r $log_file"
+        return 0
+    fi
+    if ! db2batch -d "$db" -f "$sql_file" -r "$log_file"; then
+        cecho RED "Fehler bei db2batch-Ausführung. Siehe $log_file für Details."
+        if [ -f "$log_file" ]; then
+            cecho RED "Letzte Zeilen des Logs:"
+            tail -10 "$log_file"
+        else
+            cecho RED "Log-Datei wurde nicht erstellt."
+        fi
+        return 1
+    fi
+    return 0
+}
+
+# Funktion zur parallelen Ausführung mit CLP
+execute_parallel() {
+    local db="$1"
+    local sql_file="$2"
+    local parallel="$3"
+    local log_file="$4"
+    if [ ! -s "$sql_file" ]; then
+        cecho YELLOW "Keine Statements in $sql_file gefunden - überspringe Ausführung"
+        return 0
+    fi
+    mkdir -p "$(dirname "$log_file")"
+    local line_count
+    line_count=$(wc -l < "$sql_file" 2>/dev/null)
+    local message="Führe ${line_count} Statements parallel aus (parallel: ${parallel})..."
+    cecho BCYAN "$message"
+    if [ $DRY_RUN -eq 1 ]; then
+        cecho YELLOW "Dry-Run: Würde parallele Ausführung mit ${parallel} Prozessen starten"
+        return 0
+    fi
+    local statements_dir="$TMP_DIR/statements_${RANDOM}"
+    mkdir -p "$statements_dir"
+    local statement_count=0
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^-- ]]; then
+            continue
+        fi
+        line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        if [ -z "$line" ]; then
+            continue
+        fi
+        if [[ "$line" =~ ^(REORG|RUNSTATS|REBIND) ]]; then
+            statement_count=$((statement_count + 1))
+            echo "$line" > "$statements_dir/statement_${statement_count}.sql"
+        fi
+    done < "$sql_file"
+    if [ $statement_count -eq 0 ]; then
+        cecho YELLOW "Keine Aufgaben zur Verarbeitung gefunden. Überspringe diesen Schritt."
+        rm -rf "$statements_dir"
+        return 0
+    fi
+    cecho BCYAN "Gefunden: ${statement_count} gültige SQL-Anweisungen"
+    
+    # Überprüfen, ob wir mehr Prozesse als Anweisungen haben
+    # Überprüfen, ob wir mehr Prozesse als Anweisungen haben
+    if [ $parallel -gt $statement_count ]; then
+        old_parallel=$parallel
+        parallel=$statement_count
+        cecho BCYAN "Optimiere Verarbeitung: $statement_count Aufgabe(n) → $parallel Prozess(e) (statt $old_parallel)"
+    fi
+    
+    local statements_per_process=$((statement_count / parallel))
+    local remainder=$((statement_count % parallel))
+    cecho BCYAN "Verteile ${statement_count} Anweisungen auf ${parallel} Prozesse"
+    local pids=()
+    for ((i=1; i<=parallel; i++)); do
+        local process_file="$statements_dir/process_${i}.clp"
+        local process_log="${log_file}.${i}"
+        local start=$(( (i-1) * statements_per_process + 1 ))
+        local end=$(( i * statements_per_process ))
+        if [ $i -le $remainder ]; then
+            start=$((start + i - 1))
+            end=$((end + i))
+        else
+            start=$((start + remainder))
+            end=$((end + remainder))
+        fi
+        echo "-- Prozess $i - Anweisungen $start bis $end" > "$process_file"
+        echo "CONNECT TO $db;" >> "$process_file"
+        for ((j=start; j<=end; j++)); do
+            if [ -f "$statements_dir/statement_${j}.sql" ]; then
+                cat "$statements_dir/statement_${j}.sql" >> "$process_file"
+                echo ";" >> "$process_file"
+            fi
+        done
+        echo "CONNECT RESET;" >> "$process_file"
+        if [ -s "$process_file" ]; then
+            db2 -tvf "$process_file" > "$process_log" 2>&1 &
+            pids+=($!)
+            cecho BCYAN "Prozess ${i} gestartet (Anweisungen ${start} bis ${end})"
+        fi
+    done
+    local success=0
+    local error_count=0
+    for pid in "${pids[@]}"; do
+        wait $pid
+        local exit_code=$?
+        if [ $exit_code -ne 0 ]; then
+            success=1
+            error_count=$((error_count + 1))
+        fi
+    done
+    > "$log_file"
+    for ((i=1; i<=parallel; i++)); do
+        local process_log="${log_file}.${i}"
+        if [ -f "$process_log" ]; then
+            cat "$process_log" >> "$log_file"
+            rm -f "$process_log"
+        fi
+    done
+    rm -rf "$statements_dir"
+    
+    # Bereinige die Variablen von Zeilenumbrüchen
+    local missing_table_errors=$(grep -c "SQL2306N.*nicht vorhanden" "$log_file" 2>/dev/null | tr -d '\n' || echo 0)
+    local syntax_errors=$(grep -c "SQL0104N" "$log_file" 2>/dev/null | tr -d '\n' || echo 0)
+    local total_errors=$(grep -c "SQL[0-9]*N" "$log_file" 2>/dev/null | tr -d '\n' || echo 0)
+    local successful_statements=$(grep -c "DB20000I" "$log_file" 2>/dev/null | tr -d '\n' || echo 0)
+    
+    # Korrigiere die Zählung der Gesamtoperationen
+    local total_operations=$((successful_statements + total_errors))
+    
+    # Debug-Ausgabe
+    echo "DEBUG: success=$success, missing_table_errors='$missing_table_errors', syntax_errors='$syntax_errors', total_errors='$total_errors', successful_statements='$successful_statements', total_operations=$total_operations" >> "$log_file"
+    
+    # Korrigierte Bedingungen mit bereinigten Variablen
+    if [ "$success" -eq 0 ]; then
+        return 0
+    elif [ "$successful_statements" -gt 0 ] && [ "$missing_table_errors" -gt 0 ] && [ "$missing_table_errors" -eq "$total_errors" ]; then
+        cecho YELLOW "Einige Tabellen wurden nicht gefunden, aber $successful_statements Operationen waren erfolgreich."
+        return 0
+    elif [ "$syntax_errors" -gt 0 ] && [ "$syntax_errors" -eq "$total_errors" ]; then
+        cecho YELLOW "Syntaxfehler in den SQL-Anweisungen, aber keine kritischen Fehler."
+        return 0
+    elif [ "$missing_table_errors" -gt 0 ] && [ "$missing_table_errors" -eq "$total_errors" ]; then
+        cecho YELLOW "Einige Tabellen wurden nicht gefunden, aber die Wartung war erfolgreich."
+        return 0
+    elif [ "$successful_statements" -gt 0 ] && [ "$total_errors" -le "$successful_statements" ]; then
+        cecho YELLOW "Einige Fehler sind aufgetreten, aber die meisten Operationen ($successful_statements von $total_operations) waren erfolgreich."
+        return 0
+    else
+        cecho RED "Fehler bei mindestens einem parallelen Prozess. Siehe $log_file für Details."
+        return 1
+    fi
+}
+
+# Funktion zur Analyse der Index-PCTFREE-Werte
+analyze_index_pctfree() {
+    local db="$1"
+    local table_list_file="$2"
+    local output_log="$3"
+    local log_prefix="$4"
+    db2 connect to "$db" > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        cecho RED "${log_prefix}Fehler: Konnte keine Verbindung zu $db fuer PCTFREE-Analyse herstellen"
+        return 1
+    fi
+    echo "Index PCTFREE Analyse fuer $db (Datum: $(date))" > "$output_log"
+    echo "=============================================" >> "$output_log"
+    if [ ! -s "$table_list_file" ]; then
+        echo "Keine Tabellen fuer Analyse gefunden." >> "$output_log"
+        db2 connect reset > /dev/null 2>&1
+        return 0
+    fi
+    local table_count=0
+    while IFS= read -r table; do
+        if [ -z "$table" ] || [[ "$table" =~ ^[[:space:]]*-- ]]; then
+            continue
+        fi
+        table=$(echo "$table" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        if [[ ! "$table" =~ ^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            continue
+        fi
+        table_count=$((table_count + 1))
+        local schema=$(echo "$table" | cut -d'.' -f1)
+        local tablename=$(echo "$table" | cut -d'.' -f2)
+        echo "Indizes fuer Tabelle: $table" >> "$output_log"
+        db2 -x "SELECT INDNAME, PCTFREE FROM SYSCAT.INDEXES WHERE TABSCHEMA = '${schema}' AND TABNAME = '${tablename}'" >> "$output_log" 2>/dev/null
+        echo "" >> "$output_log"
+    done < "$table_list_file"
+    db2 connect reset > /dev/null 2>&1
+    cecho BCYAN "${log_prefix}PCTFREE-Analyse fuer $table_count Tabellen in $db abgeschlossen. Ergebnisse in $output_log"
+}
+
+# Funktion für REORG/RUNSTATS/REBIND pro DB
 process_database() {
     local db="$1"
     local log_prefix="${LOG_DIR}/${db}.${TS}"
-
+    mkdir -p "$LOG_DIR"
     cecho BYELLOW "====================="
     cecho BYELLOW "Wartung für $db..."
     cecho BYELLOW "====================="
-
-    if [ $DRY_RUN -eq 0 ]; then
-        if ! db2 connect to "$db" > "${log_prefix}.connect.log" 2>&1; then
-            cecho RED "Fehler: Konnte keine Verbindung zu $db herstellen. Siehe ${log_prefix}.connect.log"
-            return 1
-        fi
-    else
-        cecho BCYAN "Dry-Run: Würde Verbindung zu $db herstellen."
-    fi
-
-    # --- Tabelleninformationen sammeln ---
-    cecho BCYAN "Sammle Tabelleninformationen (Größe, etc.)..."
-    local all_tables_info_file="$TMP_DIR/tables_info_${db}.txt"
-    local all_tables_list_file="$TMP_DIR/tables_list_${db}.txt"
-    
-    local filter_clause=""
-    if [ -n "$TABLE_FILTER" ]; then
-        local schema_filter="${TABLE_FILTER%%.*}"
-        local table_filter="${TABLE_FILTER#*.}"
-        if [ "$schema_filter" != "$table_filter" ]; then
-            filter_clause="AND T.TABSCHEMA = '${schema_filter}' AND T.TABNAME LIKE '${table_filter}'"
-        else
-            filter_clause="AND T.TABNAME LIKE '${TABLE_FILTER}'"
-        fi
-    fi
-
-    local tables_query="SELECT RTRIM(T.TABSCHEMA), RTRIM(T.TABNAME), T.CARD, T.NPAGES, T.FPAGES FROM SYSCAT.TABLES T WHERE T.TYPE = 'T' AND T.TABSCHEMA NOT LIKE 'SYS%' ${filter_clause} WITH UR"
-    
-    if [ $DRY_RUN -eq 0 ]; then
-        db2 -x "$tables_query" | awk '{printf "%s.%s %d %d %d\n", $1, $2, $3, $4, $5}' > "$all_tables_info_file"
-        awk '{print $1}' "$all_tables_info_file" > "$all_tables_list_file"
-    else
-        # Im Dry-Run Modus mit Beispieldaten arbeiten
-        cecho BCYAN "Dry-Run: Generiere Beispieldaten für Tabellen."
-        cat << EOF > "$all_tables_info_file"
-SCHEMA1.TABLE1 10000 100 10
-SCHEMA1.TABLE2 5000000 5000 4500
-SCHEMA2.TABLE3 200 5 1
-EOF
-        awk '{print $1}' "$all_tables_info_file" > "$all_tables_list_file"
-    fi
-    
-    local total_tables=$(wc -l < "$all_tables_list_file")
-    if [ "$total_tables" -eq 0 ]; then
-        cecho YELLOW "Keine Tabellen in $db gefunden, die dem Filter entsprechen. Überspringe..."
-        [ $DRY_RUN -eq 0 ] && db2 connect reset > /dev/null
+    local table_sizes_file="$TMP_DIR/${db}_table_sizes.txt"
+    get_table_sizes "$db" "$table_sizes_file"
+    if [ ! -s "$table_sizes_file" ] || grep -q "Keine Tabellen gefunden" "$table_sizes_file"; then
+        cecho YELLOW "Keine Tabellen in $db gefunden. Überspringe..."
         return 0
     fi
+    local total_tables=$(wc -l < "$table_sizes_file")
     cecho BCYAN "Verarbeite $total_tables Tabellen in $db"
-
-    # --- REORG ---
-    local reorg_script="$TMP_DIR/reorg_${db}.sql"
-    local reorged_tables_list="$TMP_DIR/reorged_tables_${db}.txt"
+    local reorg_candidates_file="$TMP_DIR/${db}_reorg_candidates.txt"
+    local reorg_count=0
+    local reorg_source_file=""
     if [ $SKIP_REORG -eq 0 ]; then
-        cecho BCYAN "Ermittle Tabellen, die eine Reorganisation benötigen..."
         if [ $FORCE_MODE -eq 1 ]; then
-            cecho BYELLOW "Force-Modus: REORG für alle Tabellen geplant."
-            cp "$all_tables_list_file" "$reorged_tables_list"
+            cecho BRED "Force-Modus: Verwende alle $total_tables Tabellen fuer REORG"
+            reorg_source_file="$table_sizes_file"
+            reorg_count=$total_tables
         else
-            # Intelligente Selektion mit ADMIN_GET_TAB_INFO
-            # Diese Abfrage ist ein Beispiel und muss ggf. angepasst werden
-            local reorg_check_query="SELECT TABSCHEMA, TABNAME FROM TABLE(SYSPROC.ADMIN_GET_TAB_INFO(NULL, NULL)) WHERE RECLAIMABLE_SPACE > 1024 * 1024 * 100" # >100MB
-            if [ $DRY_RUN -eq 0 ]; then
-                 db2 -x "$reorg_check_query" | awk '{print $1"."$2}' > "$reorged_tables_list"
+            get_reorg_candidates "$db" "$reorg_candidates_file"
+            if [ ! -s "$reorg_candidates_file" ] || grep -q "Keine REORG-Kandidaten gefunden" "$reorg_candidates_file"; then
+                cecho BCYAN "Keine Tabellen benötigen REORG"
+                reorg_count=0
+                reorg_source_file=""
             else
-                cecho BCYAN "Dry-Run: Simuliere REORG-Prüfung. Wähle 1 Tabelle für REORG aus."
-                head -n 1 "$all_tables_list_file" > "$reorged_tables_list"
+                local raw_count
+                raw_count=$(grep -v "^--" "$reorg_candidates_file" | grep -c "." 2>/dev/null)
+                if [[ "$raw_count" =~ ^[0-9]+$ ]]; then
+                    reorg_count=$raw_count
+                else
+                    cecho RED "Warnung: Konnte Anzahl der REORG-Kandidaten nicht bestimmen. Setze auf 0."
+                    reorg_count=0
+                fi
+                cecho BCYAN "$reorg_count Tabellen benötigen REORG"
+                reorg_source_file="$reorg_candidates_file"
             fi
         fi
-        
-        while IFS= read -r table; do
-            echo "REORG TABLE $table INPLACE ALLOW WRITE ACCESS;" >> "$reorg_script"
-        done < "$reorged_tables_list"
-        execute_script "$db" "$reorg_script" "REORG" "${log_prefix}.reorg.log"
-    else
-        cecho YELLOW "REORG für $db übersprungen."
     fi
-
-    # --- RUNSTATS ---
-    local runstats_script="$TMP_DIR/runstats_${db}.sql"
-    if [ $SKIP_RUNSTATS -eq 0 ]; then
-        cecho BCYAN "Generiere RUNSTATS-Befehle basierend auf Tabellengröße..."
+    
+    # Führe RUNSTATS (leicht) für alle Tabellen durch
+    if [ $SKIP_RUNSTATS -eq 0 ] && [ "${config[runstats.initial_light]}" = "true" ]; then
+        local runstats_light_sql="$TMP_DIR/${db}_runstats_light.sql"
+        generate_runstats_sql "$table_sizes_file" "$runstats_light_sql" "light"
         
-        local large_table_threshold=${config[runstats.large_table_threshold]:-1000000}
-        local small_table_threshold=${config[runstats.small_table_threshold]:-10000}
-        local sample_rate=${config[runstats.sample_rate]:-10}
-
-        # Generiere RUNSTATS basierend auf Größe und Reorg-Status
-        while IFS= read -r line; do
-            local table=$(echo "$line" | awk '{print $1}')
-            local card=$(echo "$line" | awk '{print $2}')
-            
-            local params="WITH DISTRIBUTION AND INDEXES ALL"
-            
-            # Überschreibe Parameter für große/kleine Tabellen
-            if [ "$card" -gt "$large_table_threshold" ]; then
-                params="WITH DISTRIBUTION AND DETAILED INDEXES ALL"
-            elif [ "$card" -lt "$small_table_threshold" ]; then
-                params="TABLESAMPLE SYSTEM($sample_rate) WITH DISTRIBUTION AND INDEXES ALL"
-            fi
-            
-            # Immer detaillierte Statistiken für reorganisierte Tabellen
-            if grep -q "^${table}$" "$reorged_tables_list" 2>/dev/null; then
-                params="WITH DISTRIBUTION AND DETAILED INDEXES ALL"
-            fi
-            
-            echo "RUNSTATS ON TABLE $table $params ALLOW WRITE ACCESS;" >> "$runstats_script"
-        done < "$all_tables_info_file"
-
-        execute_script "$db" "$runstats_script" "RUNSTATS" "${log_prefix}.runstats.log"
-    else
-        cecho YELLOW "RUNSTATS für $db übersprungen."
-    fi
-
-    # --- REBIND ---
-    local rebind_script="$TMP_DIR/rebind_${db}.sql"
-    if [ $SKIP_REBIND -eq 0 ]; then
-        cecho BCYAN "Generiere REBIND-Befehle..."
-        echo "CALL SYSPROC.ADMIN_REVALIDATE_DB_OBJECTS(NULL, NULL, NULL);" > "$rebind_script"
-        
-        local invalid_packages_query="SELECT 'REBIND PACKAGE \"' || RTRIM(PKGSCHEMA) || '\".\"' || RTRIM(PKGNAME) || '\";' FROM SYSCAT.PACKAGES WHERE VALID = 'N' AND PKGSCHEMA NOT LIKE 'SYS%'"
-        if [ $DRY_RUN -eq 0 ]; then
-            db2 -x "$invalid_packages_query" >> "$rebind_script"
+        # Prüfen, ob die SQL-Datei Anweisungen enthält
+        if [ ! -s "$runstats_light_sql" ] || grep -q "Keine Tabellen gefunden" "$runstats_light_sql"; then
+            cecho YELLOW "Keine Tabellen für RUNSTATS gefunden. Überspringe RUNSTATS (leicht)."
         else
-            cecho BCYAN "Dry-Run: Füge Beispiel-REBIND-Befehl hinzu."
-            echo "REBIND PACKAGE \"MYSCHEMA.MYPACKAGE\";" >> "$rebind_script"
+            execute_parallel "$db" "$runstats_light_sql" "$RUNSTATS_PARALLEL" "${log_prefix}.runstats_light.log"
+            local runstats_light_result=$?
+            if [ $runstats_light_result -eq 0 ]; then
+                cecho BGREEN "RUNSTATS (leicht) für $db abgeschlossen."
+                if [ "${config[runstats.flush_package_cache]}" = "true" ]; then
+                    cecho BYELLOW "Führe FLUSH PACKAGE CACHE DYNAMIC aus (nach RUNSTATS light)..."
+                    local flush_clp="$TMP_DIR/flush_cache_light.clp"
+                    echo "CONNECT TO $db;" > "$flush_clp"
+                    echo "FLUSH PACKAGE CACHE DYNAMIC;" >> "$flush_clp"
+                    echo "CONNECT RESET;" >> "$flush_clp"
+                    if db2 -tvf "$flush_clp" > "${log_prefix}.flush_cache_light.log" 2>&1; then
+                        cecho BGREEN "FLUSH PACKAGE CACHE DYNAMIC erfolgreich ausgeführt (nach RUNSTATS light)."
+                    else
+                        cecho RED "Fehler bei FLUSH PACKAGE CACHE DYNAMIC (nach RUNSTATS light). Siehe ${log_prefix}.flush_cache_light.log"
+                    fi
+                    rm -f "$flush_clp"
+                fi
+            else
+                cecho RED "Fehler bei RUNSTATS (leicht) für $db."
+            fi
         fi
-        execute_script "$db" "$rebind_script" "REBIND" "${log_prefix}.rebind.log"
-    else
-        cecho YELLOW "REBIND für $db übersprungen."
     fi
-
-    if [ $DRY_RUN -eq 0 ]; then
-        db2 connect reset > /dev/null
+    
+    # Führe REORG durch, wenn erforderlich
+    if [ $SKIP_REORG -eq 0 ]; then
+        if ( [[ "$reorg_count" =~ ^[0-9]+$ ]] && [ "$reorg_count" -gt 0 ] 2>/dev/null ) || [ $FORCE_MODE -eq 1 ]; then
+             if [ $FORCE_MODE -eq 1 ]; then
+                cecho BRED "Starte REORG für ALLE $total_tables Tabellen (Force-Modus)..."
+             else
+                cecho BCYAN "Starte REORG für $reorg_count Tabellen..."
+             fi
+             local reorg_sql="$TMP_DIR/${db}_reorg.sql"
+             if [ $FORCE_MODE -eq 1 ]; then
+                 generate_reorg_sql_force "$table_sizes_file" "$reorg_sql"
+             else
+                 generate_reorg_sql "$reorg_candidates_file" "$reorg_sql" "$table_sizes_file"
+             fi
+             
+             # Prüfen, ob die SQL-Datei Anweisungen enthält
+             if [ ! -s "$reorg_sql" ] || grep -q "Keine.*REORG-Kandidaten gefunden" "$reorg_sql" || grep -q "Keine gültigen REORG-Anweisungen generiert" "$reorg_sql"; then
+                 cecho YELLOW "Keine REORG-Anweisungen generiert. Überspringe REORG."
+                 reorg_count=0
+             else
+                 local total_reorg_pages
+                 if [ $FORCE_MODE -eq 1 ]; then
+                     total_reorg_pages=$(awk -F' ' '{sum+=$3} END {print sum+0}' "$table_sizes_file")
+                 else
+                     total_reorg_pages=$(awk -F' ' '{sum+=$3} END {print sum+0}' "$table_sizes_file")
+                 fi
+                 local max_pages=${config[general.max_total_reorg_pages]:-100000}
+                 local adjusted_parallel=$REORG_PARALLEL
+                 if [ "$total_reorg_pages" -gt "$max_pages" ]; then
+                     cecho BYELLOW "Reduziere REORG-Parallelität aufgrund hoher Seitenanzahl ($total_reorg_pages > $max_pages)"
+                     adjusted_parallel=1
+                 fi
+                 execute_parallel "$db" "$reorg_sql" "$adjusted_parallel" "${log_prefix}.reorg.log"
+                 local reorg_result=$?
+                 if [ $reorg_result -eq 0 ]; then
+                     if [ $FORCE_MODE -eq 1 ]; then
+                         cecho BRED "REORG für ALLE Tabellen in $db abgeschlossen (Force-Modus)."
+                     else
+                         cecho BGREEN "REORG für $db abgeschlossen."
+                     fi
+                     if [ "${config[general.analyze_index_pctfree]}" = "true" ]; then
+                         cecho BYELLOW "Führe Index-PCTFREE-Analyse durch..."
+                         local pctfree_log="${log_prefix}.pctfree_analysis.log"
+                         local analysis_source_file=""
+                         if [ $FORCE_MODE -eq 1 ]; then
+                             local temp_all_tables="$TMP_DIR/${db}_all_tables_for_analysis.txt"
+                             awk -F' ' '{print $1}' "$table_sizes_file" > "$temp_all_tables"
+                             analysis_source_file="$temp_all_tables"
+                         else
+                             analysis_source_file="$reorg_candidates_file"
+                         fi
+                         analyze_index_pctfree "$db" "$analysis_source_file" "$pctfree_log" "[$db] "
+                         if [ $FORCE_MODE -eq 1 ] && [ -f "$temp_all_tables" ]; then
+                             rm -f "$temp_all_tables"
+                         fi
+                     fi
+                 else
+                     cecho RED "Fehler bei REORG für $db."
+                 fi
+             fi
+        else
+             cecho BCYAN "Kein REORG erforderlich (Anzahl: $reorg_count)."
+        fi
     fi
+    
+    # Führe vollständige RUNSTATS nach REORG durch, wenn konfiguriert
+    if [ $SKIP_RUNSTATS -eq 0 ] && [ "${config[runstats.full_after_reorg]}" = "true" ]; then
+        if ( [[ "$reorg_count" =~ ^[0-9]+$ ]] && [ "$reorg_count" -gt 0 ] 2>/dev/null ) || [ $FORCE_MODE -eq 1 ]; then
+            if [ $FORCE_MODE -eq 1 ]; then
+                cecho BRED "Starte vollständige RUNSTATS für ALLE $total_tables Tabellen (Force-Modus nach REORG)..."
+                local runstats_full_sql="$TMP_DIR/${db}_runstats_full_force.sql"
+                generate_runstats_sql "$table_sizes_file" "$runstats_full_sql" "full"
+            else
+                cecho BCYAN "Starte vollständige RUNSTATS für $reorg_count reorgte Tabellen..."
+                local runstats_full_sql="$TMP_DIR/${db}_runstats_full.sql"
+                generate_runstats_sql "$reorg_candidates_file" "$runstats_full_sql" "full"
+            fi
+            
+            # Prüfen, ob die SQL-Datei Anweisungen enthält
+            if [ ! -s "$runstats_full_sql" ] || grep -q "Keine Tabellen gefunden" "$runstats_full_sql"; then
+                # Überprüfen, ob die REORG-Kandidaten-Datei Tabellen enthält
+                if [ -s "$reorg_candidates_file" ] && ! grep -q "Keine.*REORG-Kandidaten gefunden" "$reorg_candidates_file"; then
+                    cecho YELLOW "Hinweis: Die reorganisierten Tabellen benötigen keine weiteren Statistiken. Überspringe diesen Schritt."
+                else
+                    cecho BCYAN "Hinweis: Nach dem REORG sind keine zusätzlichen Statistiken erforderlich."
+                fi
+            else
+                execute_parallel "$db" "$runstats_full_sql" "$RUNSTATS_PARALLEL" "${log_prefix}.runstats_full.log"
+                local runstats_full_result=$?
+                if [ $runstats_full_result -eq 0 ]; then
+                    if [ $FORCE_MODE -eq 1 ]; then
+                        cecho BRED "RUNSTATS (voll) für ALLE Tabellen in $db abgeschlossen (Force-Modus)."
+                    else
+                        cecho BGREEN "RUNSTATS (voll) für reorgte Tabellen in $db abgeschlossen."
+                    fi
+                    if [ "${config[runstats.flush_package_cache]}" = "true" ]; then
+                        cecho BYELLOW "Führe FLUSH PACKAGE CACHE DYNAMIC aus (nach RUNSTATS full)..."
+                        local flush_clp="$TMP_DIR/flush_cache_full.clp"
+                        echo "CONNECT TO $db;" > "$flush_clp"
+                        echo "FLUSH PACKAGE CACHE DYNAMIC;" >> "$flush_clp"
+                        echo "CONNECT RESET;" >> "$flush_clp"
+                        if db2 -tvf "$flush_clp" > "${log_prefix}.flush_cache_full.log" 2>&1; then
+                            cecho BGREEN "FLUSH PACKAGE CACHE DYNAMIC erfolgreich ausgeführt (nach RUNSTATS full)."
+                        else
+                            cecho RED "Fehler bei FLUSH PACKAGE CACHE DYNAMIC (nach RUNSTATS full). Siehe ${log_prefix}.flush_cache_full.log"
+                        fi
+                        rm -f "$flush_clp"
+                    fi
+                else
+                    if [ $FORCE_MODE -eq 1 ]; then
+                        cecho RED "Fehler bei RUNSTATS (voll) für ALLE Tabellen in $db (Force-Modus)."
+                    else
+                        cecho RED "Fehler bei RUNSTATS (voll) für reorgte Tabellen in $db."
+                    fi
+                fi
+            fi
+        else
+             cecho BCYAN "Keine vollständigen RUNSTATS erforderlich (keine REORG durchgeführt)."
+        fi
+    fi
+    
+    # Führe REVALIDATE/REBIND durch
+    if [ $SKIP_REBIND -eq 0 ]; then
+        cecho BYELLOW "Starte REVALIDATE/REBIND für $db..."
+        local revalidate_sql="$TMP_DIR/${db}_revalidate.sql"
+        echo "-- REVALIDATE Statements" > "$revalidate_sql"
+        echo "CALL SYSPROC.ADMIN_REVALIDATE_DB_OBJECTS(NULL, NULL, NULL);" >> "$revalidate_sql"
+        execute_with_db2batch "$db" "$revalidate_sql" 1 "${log_prefix}.revalidate.log"
+        local rebind_sql="$TMP_DIR/${db}_rebind.sql"
+        generate_rebind_sql "$db" "$rebind_sql"
+        execute_with_db2batch "$db" "$rebind_sql" 1 "${log_prefix}.rebind.log"
+        if [ $? -eq 0 ]; then
+            cecho BGREEN "REBIND für $db abgeschlossen."
+        else
+            cecho RED "Fehler bei REBIND für $db."
+        fi
+    fi
+    
     cecho BGREEN "Wartung für $db abgeschlossen. Logs in $log_prefix.*"
     echo
+    
+    # Speichere Historie, wenn konfiguriert
+    if [ "${config[general.enable_history]}" = "true" ]; then
+        local history_file="$HISTORY_DIR/${db}_${TS}.json"
+        mkdir -p "$HISTORY_DIR"
+        echo "{\"database\": \"$db\", \"timestamp\": \"$(date -Iseconds)\", \"tables_processed\": $total_tables}" > "$history_file"
+    fi
 }
 
-# Interaktiver Modus (bleibt weitgehend unverändert)
+# Interaktiver Modus
 interactive_mode() {
     cecho BGREEN "Interaktiver Modus"
-    echo "Bitte wÃ¤hlen Sie die auszufÃ¼hrenden Aktionen:"
-    
-    # Datenbank auswÃ¤hlen
+    echo "Bitte wählen Sie die auszuführenden Aktionen:"
     if [ -z "$SPECIFIC_DB" ]; then
-        echo "VerfÃ¼gbare Datenbanken:"
+        echo "Verfügbare Datenbanken:"
         select db in "${databases[@]}"; do
             if [ -n "$db" ]; then
                 SPECIFIC_DB="$db"
                 break
             else
-                cecho RED "UngÃ¼ltige Auswahl"
+                cecho RED "Ungültige Auswahl"
             fi
         done
     fi
-    
-    # Aktionen auswÃ¤hlen
-    echo "Welche Aktionen sollen ausgefÃ¼hrt werden?"
+    echo "Welche Aktionen sollen ausgeführt werden?"
     options=("REORG" "RUNSTATS" "REBIND" "Alle Aktionen" "Beenden")
     select action in "${options[@]}"; do
         case "$action" in
@@ -629,17 +1148,15 @@ interactive_mode() {
                 exit 0
                 ;;
             *)
-                cecho RED "UngÃ¼ltige Auswahl"
+                cecho RED "Ungültige Auswahl"
                 ;;
         esac
     done
-    
-    # Tabellenfilter auswÃ¤hlen
-    echo "MÃ¶chten Sie einen Tabellenfilter verwenden?"
+    echo "Möchten Sie einen Tabellenfilter verwenden?"
     select filter_choice in "Ja" "Nein"; do
         case "$filter_choice" in
             "Ja")
-                read -p "Geben Sie den Tabellenfilter ein (z.B. 'SCHEMA.%' oder '%TABLE'): " TABLE_FILTER
+                read -p "Geben Sie den Tabellenfilter ein: " TABLE_FILTER
                 break
                 ;;
             "Nein")
@@ -647,13 +1164,11 @@ interactive_mode() {
                 break
                 ;;
             *)
-                cecho RED "UngÃ¼ltige Auswahl"
+                cecho RED "Ungültige Auswahl"
                 ;;
         esac
     done
-    
-    # PrioritÃ¤t auswÃ¤hlen
-    echo "Welche PrioritÃ¤t soll fÃ¼r die Tabellenverarbeitung verwendet werden?"
+    echo "Welche Priorität soll für die Tabellenverarbeitung verwendet werden?"
     select priority in "Niedrig" "Mittel" "Hoch"; do
         case "$priority" in
             "Niedrig")
@@ -669,13 +1184,11 @@ interactive_mode() {
                 break
                 ;;
             *)
-                cecho RED "UngÃ¼ltige Auswahl"
+                cecho RED "Ungültige Auswahl"
                 ;;
         esac
     done
-    
-    # Force-Modus auswÃ¤hlen
-    echo "MÃ¶chten Sie den Force-Modus verwenden (alle Tabellen ohne PrÃ¼fung verarbeiten)?"
+    echo "Möchten Sie den Force-Modus verwenden?"
     select force_choice in "Ja" "Nein"; do
         case "$force_choice" in
             "Ja")
@@ -687,21 +1200,17 @@ interactive_mode() {
                 break
                 ;;
             *)
-                cecho RED "UngÃ¼ltige Auswahl"
+                cecho RED "Ungültige Auswahl"
                 ;;
         esac
     done
-    
-    # Zusammenfassung anzeigen
-    cecho BGREEN "Zusammenfassung der ausgewÃ¤hlten Optionen:"
+    cecho BGREEN "Zusammenfassung der ausgewählten Optionen:"
     echo "Datenbank: $SPECIFIC_DB"
     echo "Aktionen: $(if [ $SKIP_REORG -eq 0 ]; then echo "REORG "; fi)$(if [ $SKIP_RUNSTATS -eq 0 ]; then echo "RUNSTATS "; fi)$(if [ $SKIP_REBIND -eq 0 ]; then echo "REBIND"; fi)"
     echo "Tabellenfilter: ${TABLE_FILTER:-"Keiner"}"
-    echo "PrioritÃ¤t: $TABLE_PRIORITY"
+    echo "Priorität: $TABLE_PRIORITY"
     echo "Force-Modus: $(if [ $FORCE_MODE -eq 1 ]; then echo "Ja"; else echo "Nein"; fi)"
-    
-    # BestÃ¤tigung einholen
-    echo "MÃ¶chten Sie mit diesen Einstellungen fortfahren?"
+    echo "Möchten Sie mit diesen Einstellungen fortfahren?"
     select confirm in "Ja" "Nein"; do
         case "$confirm" in
             "Ja")
@@ -712,29 +1221,18 @@ interactive_mode() {
                 exit 0
                 ;;
             *)
-                cecho RED "UngÃ¼ltige Auswahl"
+                cecho RED "Ungültige Auswahl"
                 ;;
         esac
     done
 }
 
-# Spezielle Funktionen fÃ¼r die Parameterberechnung
-if [ "$1" = "--needs-reorg" ]; then
-    needs_reorg "$2" "$3" "$4"
-    exit 0
-fi
-
-if [ "$1" = "--get-runstats-params" ]; then
-    get_runstats_params "$2" "$3" "$4"
-    exit 0
-fi
-
-# Automatische Konfiguration durchfÃ¼hren
+# Automatische Konfiguration durchführen
 if [ $AUTO_CONFIG -eq 1 ]; then
     auto_configure
 fi
 
-# Systemressourcen prÃ¼fen, falls gewÃ¼nscht
+# Systemressourcen prüfen
 if [ $CHECK_RESOURCES -eq 1 ]; then
     check_system_resources
 fi
@@ -743,12 +1241,7 @@ fi
 if [ -n "$SPECIFIC_DB" ]; then
     databases=("$SPECIFIC_DB")
 else
-    if [ $DRY_RUN -eq 0 ]; then
-        databases=($(db2 list database directory | awk -F'= ' '/Datenbankname/ || /Database name/{print $2}'))
-    else
-        cecho BYELLOW "Dry-Run: Verwende Beispieldatenbank 'TESTDB'"
-        databases=("TESTDB")
-    fi
+    databases=($(db2 list database directory | awk -F'= ' '/Datenbankname/ || /Database name/{print $2}'))
 fi
 
 if [ ${#databases[@]} -eq 0 ]; then
@@ -756,14 +1249,14 @@ if [ ${#databases[@]} -eq 0 ]; then
     exit 1
 fi
 
-# Interaktiver Modus, falls gewÃ¼nscht
+# Interaktiver Modus
 if [ $INTERACTIVE -eq 1 ]; then
     interactive_mode
 fi
 
-# Ausgabe des Force-Modus, falls aktiviert
+# Ausgabe des Force-Modus
 if [ $FORCE_MODE -eq 1 ]; then
-    cecho BRED "ACHTUNG: Force-Modus aktiviert! REORG, RUNSTATS und REBIND werden fÃ¼r alle Tabellen ohne vorherige PrÃ¼fung durchgefÃ¼hrt."
+    cecho BRED "ACHTUNG: Force-Modus aktiviert! REORG, RUNSTATS und REBIND werden für alle Tabellen ohne vorherige Prüfung durchgeführt."
 fi
 
 cecho BGREEN "=========================================="
@@ -771,43 +1264,10 @@ cecho BGREEN "Starte DB2-Datenbankwartung... (Datum: $(date '+%d.%m.%Y %H:%M CES
 cecho BGREEN "=========================================="
 echo
 
-# --- HAUPTSTEUERUNG ---
-
-# Funktionen und Variablen für Subshells exportieren, wenn parallel ausgeführt wird
-if [ $PARALLEL -eq 1 ]; then
-    export -f cecho
-    export -f execute_script
-    export -f process_database
-    export LOG_DIR CONFIG_DIR HISTORY_DIR TMP_DIR TS
-    export DRY_RUN SKIP_REORG SKIP_RUNSTATS SKIP_REBIND FORCE_MODE
-    declare -A config
-    # config muss für subshells verfügbar gemacht werden
-    # Dies ist eine Bash 4+ Syntax
-    if ((BASH_VERSINFO[0] >= 4)); then
-        export CONFIG_CONTENT=$(declare -p config)
-        process_db_parallel() {
-            eval "declare -A config; ${CONFIG_CONTENT#*=}"
-            process_database "$1"
-        }
-        export -f process_db_parallel
-    fi
-fi
-
-cecho BGREEN "=========================================="
-cecho BGREEN "Starte DB2-Datenbankwartung... (Datum: $(date '+%d.%m.%Y %H:%M'))"
-cecho BGREEN "=========================================="
-echo
-
-# Haupt-Schleife: Sequentiell oder Parallel
-if [ $PARALLEL -eq 1 ] && ((BASH_VERSINFO[0] >= 4)); then
-    cecho BGREEN "Führe Wartung parallel für ${#databases[@]} Datenbanken aus (max. $TABLE_PARALLEL gleichzeitig)..."
-    printf "%s\n" "${databases[@]}" | xargs -P "$TABLE_PARALLEL" -I {} bash -c 'process_db_parallel "{}"'
-else
-    cecho BGREEN "Führe Wartung sequentiell für ${#databases[@]} Datenbanken aus..."
-    for db in "${databases[@]}"; do
-        process_database "$db"
-    done
-fi
+# Haupt-Schleife: Sequentielle Verarbeitung
+for db in "${databases[@]}"; do
+    process_database "$db"
+done
 
 cecho BGREEN "==================================="
 cecho BGREEN "DB2-Datenbankwartung abgeschlossen!"
