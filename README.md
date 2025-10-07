@@ -67,7 +67,7 @@ Stellen Sie sicher, dass alle `AUTO_*`-Parameter auf `OFF` stehen.
 
 1.  Klonen Sie dieses Repository auf Ihren Server:
     ```bash
-    git clone https://github.com/mrAibo/db2maintenance.git
+    git clone [https://github.com/mrAibo/db2maintenance.git](https://github.com/mrAibo/db2maintenance.git)
     cd [PROJEKT_ORDNER]
     ```
 
