@@ -58,7 +58,7 @@ Stellen Sie sicher, dass alle `AUTO_*`-Parameter auf `OFF` stehen.
 
 ## Voraussetzungen
 
-- Ein Linux- oder UNIX-ähnliches Betriebssystem (getestet auf [IHR_BETRIEBSSYSTEM])
+- Ein Linux- oder UNIX-ähnliches Betriebssystem
 - DB2-Datenbankserver mit den Kommandozeilenwerkzeugen (`db2`, `db2batch`)
 - Bash-Shell (Version 4.0 oder höher)
 - Standard-Unix-Werkzeuge: `awk`, `grep`, `wc`, `mktemp`, `tput`, `bc`
@@ -67,7 +67,7 @@ Stellen Sie sicher, dass alle `AUTO_*`-Parameter auf `OFF` stehen.
 
 1.  Klonen Sie dieses Repository auf Ihren Server:
     ```bash
-    git clone [https://github.com/mrAibo/db2maintenance.git](https://github.com/mrAibo/db2maintenance.git)
+    git clone https://github.com/mrAibo/db2maintenance.git
     cd [PROJEKT_ORDNER]
     ```
 
