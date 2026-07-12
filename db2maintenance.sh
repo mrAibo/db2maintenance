@@ -32,6 +32,18 @@ cecho() {
     printf "%s%s%s\n" "${color_code}" "${msg}" "${color_reset}"
 }
 
+# Vergleich über bc (fallback, falls bc fehlt)
+bc_cmp() {
+    # bc_cmp "A > B"  -> 0 wenn wahr, 1 wenn falsch/unverfügbar
+    if command -v bc >/dev/null 2>&1; then
+        local r
+        r=$(echo "$1" | bc -l 2>/dev/null)
+        [ "$r" = "1" ] && return 0
+        return 1
+    fi
+    return 1
+}
+
 # Standard-Konfiguration
 DEFAULT_CONFIG=$(cat << 'EOF'
 # DB2 Wartungskonfiguration (optimiert)
@@ -187,27 +199,37 @@ TEST_MODE=0
 PROGRESS=0
 FORCE_MODE=0
 
+# Hilfsfunktion: Wert für Option mit Argument prüfen
+require_arg() {
+    local opt="$1"
+    if [ $# -lt 2 ] || [ -z "$2" ]; then
+        cecho RED "Fehler: Option $opt benötigt einen Wert"
+        exit 1
+    fi
+}
+
+# Argumente parsen (vor Benutzer-/Umgebungsprüfung, damit --help/Fehler auch ohne db2icm funktionieren)
 while [[ $# -gt 0 ]]; do
     case $1 in
         --help) show_help ;;
         --dry-run) DRY_RUN=1 ;;
         --parallel) PARALLEL=1 ;;
-        --database) SPECIFIC_DB="$2"; shift ;;
-        --table-parallel) TABLE_PARALLEL="$2"; shift ;;
-        --batch-size) BATCH_SIZE="$2"; shift ;;
+        --database) require_arg "$1" "${2:-}"; SPECIFIC_DB="$2"; shift ;;
+        --table-parallel) require_arg "$1" "${2:-}"; TABLE_PARALLEL="$2"; shift ;;
+        --batch-size) require_arg "$1" "${2:-}"; BATCH_SIZE="$2"; shift ;;
         --skip-reorg) SKIP_REORG=1 ;;
         --skip-runstats) SKIP_RUNSTATS=1 ;;
         --skip-rebind) SKIP_REBIND=1 ;;
         --reorg-only) REORG_ONLY=1 ;;
         --runstats-only) RUNSTATS_ONLY=1 ;;
         --rebind-only) REBIND_ONLY=1 ;;
-        --table-priority) TABLE_PRIORITY="$2"; shift ;;
-        --table-filter) TABLE_FILTER="$2"; shift ;;
+        --table-priority) require_arg "$1" "${2:-}"; TABLE_PRIORITY="$2"; shift ;;
+        --table-filter) require_arg "$1" "${2:-}"; TABLE_FILTER="$2"; shift ;;
         --check-resources) CHECK_RESOURCES=1 ;;
         --auto-config) AUTO_CONFIG=1 ;;
         --no-auto-config) AUTO_CONFIG=0 ;;
-        --config-file) CONFIG_FILE="$2"; shift ;;
-        --profile) PROFILE="$2"; shift ;;
+        --config-file) require_arg "$1" "${2:-}"; CONFIG_FILE="$2"; shift ;;
+        --profile) require_arg "$1" "${2:-}"; PROFILE="$2"; shift ;;
         --interactive) INTERACTIVE=1 ;;
         --resume) RESUME=1 ;;
         --test-mode) TEST_MODE=1 ;;
@@ -282,16 +304,27 @@ else
     load_config "$CONFIG_DIR/config.ini"
 fi
 
-# Profil anwenden
+# Profil anwenden (überschreibt gesetzte Werte)
 if [ -n "$PROFILE" ]; then
     if [[ -v "config[profiles.$PROFILE]" ]]; then
         cecho BCYAN "Verwende Profil: $PROFILE"
+        # Profil-Werte auf die entsprechenden Sektionen anwenden
+        for key in "${!config[@]}"; do
+            if [[ "$key" == profiles."$PROFILE".* ]]; then
+                local_opt="${key#profiles.$PROFILE.}"
+                config["$local_opt"]="${config[$key]}"
+            fi
+        done
+        # Profil-Schlüssel auf die tatsächlich gelesenen Sektionsschlüssel mappen
+        [ -n "${config[reorg_max_parallel]:-}" ] && config[reorg.max_parallel_reorg]="${config[reorg_max_parallel]}"
+        [ -n "${config[runstats_max_parallel]:-}" ] && config[runstats.max_parallel_runstats]="${config[runstats_max_parallel]}"
     else
         cecho RED "Profil nicht gefunden: $PROFILE"
         exit 1
     fi
 fi
 
+# Hilfsfunktion: Wert für Option mit Argument prüfen
 # Temp-Verzeichnis
 TMP_DIR=$(umask 077; mktemp -d -p /tmp db2_maintenance.XXXXXX) || { cecho RED "Fehler beim Erstellen des Temp-Verzeichnisses"; exit 1; }
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -338,7 +371,11 @@ get_cpu_usage() {
         local total_diff=$((user_diff + nice_diff + system_diff + idle_diff + iowait_diff + irq_diff + softirq_diff))
         local busy_diff=$((total_diff - idle_diff))
         if [ $total_diff -gt 0 ]; then
-            echo "scale=2; ($busy_diff * 100) / $total_diff" | bc -l
+            if command -v bc >/dev/null 2>&1; then
+                echo "scale=2; ($busy_diff * 100) / $total_diff" | bc -l
+            else
+                echo "$((busy_diff * 100 / total_diff))"
+            fi
         else
             echo "0"
         fi
@@ -363,7 +400,7 @@ auto_configure() {
         if [ "$TABLE_PARALLEL" -gt "$max_parallel" ]; then
             TABLE_PARALLEL=$max_parallel
         fi
-        if [ "$(echo "$CPU_USAGE > 70" | bc -l)" -eq 1 ]; then
+        if bc_cmp "$CPU_USAGE > 70"; then
             TABLE_PARALLEL=$((TABLE_PARALLEL / 2))
             cecho BYELLOW "Reduziere Parallelisierung aufgrund hoher CPU-Auslastung auf $TABLE_PARALLEL"
         fi
@@ -411,7 +448,7 @@ check_system_resources() {
     fi
     cecho GREEN "Freier Speicher: ${FREE_MEM_MB}MB"
     local CPU_USAGE=$(get_cpu_usage)
-    if [ $(echo "$CPU_USAGE > 90" | bc -l) -eq 1 ]; then
+    if bc_cmp "$CPU_USAGE > 90"; then
         cecho RED "CPU-Auslastung zu hoch: ${CPU_USAGE}%"
         exit 1
     fi
@@ -529,7 +566,9 @@ verify_existing_tables() {
         # Überprüfen, ob die Tabelle existiert
         local schema=$(echo "$table" | cut -d'.' -f1)
         local tablename=$(echo "$table" | cut -d'.' -f2)
-        
+        # Einzelne Hochkommata escapen (SQL-Injection-Schutz)
+        schema=$(printf '%s' "$schema" | sed "s/'/''/g")
+        tablename=$(printf '%s' "$tablename" | sed "s/'/''/g")
         if db2 -x "SELECT 1 FROM SYSCAT.TABLES WHERE TABSCHEMA = '$schema' AND TABNAME = '$tablename' WITH UR" > /dev/null 2>&1; then
             echo "$table" >> "$temp_file"
         else
@@ -561,10 +600,10 @@ generate_runstats_sql() {
         fi
         
         if [ "$mode" = "light" ]; then
-            # Leichtgewichtige RUNSTATS für alle Tabellen
-            echo "RUNSTATS ON TABLE $table WITH DISTRIBUTION AND INDEXES ALL ALLOW WRITE ACCESS" >> "$output_file"
+            # Leichtgewichtige RUNSTATS für alle Tabellen (nur Basis-Statistiken)
+            echo "RUNSTATS ON TABLE $table ALLOW WRITE ACCESS" >> "$output_file"
         else
-            # Volle RUNSTATS nur nach REORG
+            # Volle RUNSTATS nach REORG (mit Verteilung und Index-Statistiken)
             echo "RUNSTATS ON TABLE $table WITH DISTRIBUTION AND INDEXES ALL ALLOW WRITE ACCESS" >> "$output_file"
         fi
     done < "$input_file"
@@ -805,13 +844,13 @@ execute_parallel() {
             cecho BCYAN "Prozess ${i} gestartet (Anweisungen ${start} bis ${end})"
         fi
     done
-    local success=0
+    local failed=0
     local error_count=0
     for pid in "${pids[@]}"; do
         wait $pid
         local exit_code=$?
         if [ $exit_code -ne 0 ]; then
-            success=1
+            failed=1
             error_count=$((error_count + 1))
         fi
     done
@@ -835,10 +874,10 @@ execute_parallel() {
     local total_operations=$((successful_statements + total_errors))
     
     # Debug-Ausgabe
-    echo "DEBUG: success=$success, missing_table_errors='$missing_table_errors', syntax_errors='$syntax_errors', total_errors='$total_errors', successful_statements='$successful_statements', total_operations=$total_operations" >> "$log_file"
+    echo "DEBUG: failed=$failed, missing_table_errors='$missing_table_errors', syntax_errors='$syntax_errors', total_errors='$total_errors', successful_statements='$successful_statements', total_operations=$total_operations" >> "$log_file"
     
     # Korrigierte Bedingungen mit bereinigten Variablen
-    if [ "$success" -eq 0 ]; then
+    if [ "$failed" -eq 0 ]; then
         return 0
     elif [ "$successful_statements" -gt 0 ] && [ "$missing_table_errors" -gt 0 ] && [ "$missing_table_errors" -eq "$total_errors" ]; then
         cecho YELLOW "Einige Tabellen wurden nicht gefunden, aber $successful_statements Operationen waren erfolgreich."
@@ -888,6 +927,9 @@ analyze_index_pctfree() {
         table_count=$((table_count + 1))
         local schema=$(echo "$table" | cut -d'.' -f1)
         local tablename=$(echo "$table" | cut -d'.' -f2)
+        # Einzelne Hochkommata escapen (SQL-Injection-Schutz)
+        schema=$(printf '%s' "$schema" | sed "s/'/''/g")
+        tablename=$(printf '%s' "$tablename" | sed "s/'/''/g")
         echo "Indizes fuer Tabelle: $table" >> "$output_log"
         db2 -x "SELECT INDNAME, PCTFREE FROM SYSCAT.INDEXES WHERE TABSCHEMA = '${schema}' AND TABNAME = '${tablename}'" >> "$output_log" 2>/dev/null
         echo "" >> "$output_log"
@@ -1282,6 +1324,12 @@ interactive_mode() {
 # Automatische Konfiguration durchführen
 if [ $AUTO_CONFIG -eq 1 ]; then
     auto_configure
+else
+    # Sichere Standardwerte, falls AUTO_CONFIG ausgeschaltet ist
+    : "${TABLE_PARALLEL:=${config[general.max_table_parallel]:-8}}"
+    : "${REORG_PARALLEL:=${config[reorg.max_parallel_reorg]:-2}}"
+    : "${RUNSTATS_PARALLEL:=${config[runstats.max_parallel_runstats]:-8}}"
+    : "${BATCH_SIZE:=${config[general.default_batch_size]:-20}}"
 fi
 
 # Systemressourcen prüfen
