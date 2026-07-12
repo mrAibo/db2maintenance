@@ -234,7 +234,7 @@ while [[ $# -gt 0 ]]; do
         --resume) RESUME=1 ;;
         --test-mode) TEST_MODE=1 ;;
         --force) FORCE_MODE=1 ;;
-        *) cecho RED "Unbekannte Option: $1"; show_help ;;
+        *) cecho RED "Unbekannte Option: $1"; show_help; exit 1 ;;
     esac
     shift
 done
