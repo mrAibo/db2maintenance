@@ -1,0 +1,19 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: bash -n db2maintenance.sh
+      - name: Arg-parse smoke test
+        env:
+          TERM: dumb
+        run: |
+          set -e
+          bash db2maintenance.sh --help >/dev/null   # must exit 0 (before user check)
+          ! bash db2maintenance.sh --database         # missing value -> exit 1
+          ! bash db2maintenance.sh --bogus            # unknown opt -> help -> non-zero
