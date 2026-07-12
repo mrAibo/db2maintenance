@@ -172,7 +172,6 @@ show_help() {
     echo "  --resume                   Setze unterbrochene Wartung fort"
     echo "  --test-mode                Testmodus - zeige nur, was getan würde"
     echo "  --force                    Erzwingt REORG, RUNSTATS und REBIND für alle Tabellen"
-    exit 0
 }
 
 # Argumente parsen
@@ -211,7 +210,7 @@ require_arg() {
 # Argumente parsen (vor Benutzer-/Umgebungsprüfung, damit --help/Fehler auch ohne db2icm funktionieren)
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --help) show_help ;;
+        --help) show_help; exit 0 ;;
         --dry-run) DRY_RUN=1 ;;
         --parallel) PARALLEL=1 ;;
         --database) require_arg "$1" "${2:-}"; SPECIFIC_DB="$2"; shift ;;
